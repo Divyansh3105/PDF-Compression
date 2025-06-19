@@ -142,7 +142,7 @@
             dropZone.querySelector('p').textContent = `Selected file: ${file.name}`;
         }
 
-        uploadBtn.addEventListener('click', () => {
+        uploadBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
 
             document.getElementById('error').classList.add('d-none');
@@ -153,24 +153,40 @@
             document.getElementById('results').classList.add('hidden');
             document.getElementById('results').innerHTML = '';
 
+            // Update progress
+            document.getElementById('progressBar').style.width = '30%';
+            document.getElementById('progressBar').textContent = '30%';
+
             const formData = new FormData();
             formData.append('file', selectedFile);
             formData.append('compression_level', selectedLevel);
 
-            fetch('/compress', {
-                method: 'POST',
-                body: formData
-            })
-                .then(response => response.json())
-                .then(data => {
-                    if (data.error) throw new Error(data.error);
-                    displayResults(data);
-                })
-                .catch(error => {
-                    document.getElementById('error').textContent = error.message;
-                    document.getElementById('error').classList.remove('d-none');
-                    document.getElementById('progressContainer').classList.add('hidden');
+            try {
+                const response = await fetch('/compress', {
+                    method: 'POST',
+                    body: formData
                 });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const data = await response.json();
+
+                if (!data.success) {
+                    throw new Error(data.error || 'Compression failed');
+                }
+
+                // Update progress to complete
+                document.getElementById('progressBar').style.width = '100%';
+                document.getElementById('progressBar').textContent = 'Completed';
+
+                displayResults(data);
+            } catch (error) {
+                document.getElementById('error').textContent = error.message;
+                document.getElementById('error').classList.remove('d-none');
+                document.getElementById('progressContainer').classList.add('hidden');
+            }
         });
 
         function formatBytes(bytes) {
