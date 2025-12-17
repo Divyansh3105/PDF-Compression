@@ -1,358 +1,223 @@
-from flask import Flask, render_template, request, send_from_directory, jsonify, Response
-import os
 import io
-import time
-import heapq
-from PyPDF2 import PdfReader, PdfWriter
-from PIL import Image
+import os
+import re
 import tempfile
-import sys
-from collections import Counter, defaultdict
-import zstandard as zstd
-import json
+import time
+import uuid
+import logging
+
+from flask import Flask, render_template, request, send_from_directory, jsonify
+from pypdf import PdfReader, PdfWriter
+from PIL import Image
+from werkzeug.utils import secure_filename
+
+log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-UPLOAD_FOLDER = 'static/uploads'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
+
+# Results live outside static/ so they are not served publicly, and are
+# only reachable through /download/<random id>.
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'pdf-compression')
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_TTL_SECONDS = 3600
+FILE_ID_RE = re.compile(r'^[0-9a-f]{32}\.pdf$')
+
+# level -> (JPEG quality, linear downscale factor) used for embedded images
+IMAGE_SETTINGS = {
+    'low': (75, 0.8),
+    'medium': (50, 0.6),
+    'high': (30, 0.4),
+}
+MIN_IMAGE_SIDE = 64  # don't touch icons / tiny images
 
 
-class PDFCompressor:
-    def __init__(self):
-        self.compression_algorithms = {
-            'HUFFMAN': self.huffman_compress,
-            'LZ77': self.lz77_compress,
-            'RLE': self.rle_compress,
-            'ZSTANDARD': self.zstandard_compress
-        }
-        self.target_ratios = {
-            'low': 0.8,
-            'medium': 0.5,
-            'high': 0.2
-        }
-        self.zstd_compressors = {
-            'low': zstd.ZstdCompressor(level=3, threads=2),
-            'medium': zstd.ZstdCompressor(level=12, threads=4),
-            'high': zstd.ZstdCompressor(level=22, threads=4)
-        }
+def lossless_optimize(pdf_data):
+    """Deflate content streams and merge duplicate objects. Keeps annotations,
+    links, forms and metadata intact."""
+    writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf_data)))
+    for page in writer.pages:
+        page.compress_content_streams()
+    writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
+    return writer
 
-    def compress_images_in_pdf(self, pdf_data, level):
-        """More aggressive image compression"""
-        try:
-            reader = PdfReader(io.BytesIO(pdf_data))
-            writer = PdfWriter()
-            has_images = False
 
-            # Image compression settings
-            quality = {'low': 75, 'medium': 50, 'high': 30}[level]
-            scale = {'low': 0.8, 'medium': 0.6, 'high': 0.4}[level]
+def recompress_images(writer, level):
+    """Downscale + re-encode embedded images as JPEG, only where that shrinks them."""
+    quality, scale = IMAGE_SETTINGS[level]
+    seen = set()  # shared images must only be processed once
 
-            for page in reader.pages:
-                if '/XObject' in page['/Resources']:
-                    x_object = page['/Resources']['/XObject'].get_object()
-                    for obj in x_object:
-                        if x_object[obj]['/Subtype'] == '/Image':
-                            has_images = True
-                            image = x_object[obj]
-
-                            # Skip already compressed images
-                            if '/Filter' in image and image['/Filter'] != '/FlateDecode':
-                                continue
-
-                            with tempfile.NamedTemporaryFile(suffix='.jpg') as tmp:
-                                try:
-                                    pil_img = Image.open(io.BytesIO(image._data))
-                                    if pil_img.mode != 'RGB':
-                                        pil_img = pil_img.convert('RGB')
-
-                                    # Apply scaling and compression
-                                    new_size = (int(pil_img.width * scale), int(pil_img.height * scale))
-                                    pil_img = pil_img.resize(new_size, Image.LANCZOS)
-                                    pil_img.save(tmp.name, 'JPEG', quality=quality, optimize=True)
-
-                                    with open(tmp.name, 'rb') as f:
-                                        image._data = f.read()
-
-                                    image['/Filter'] = '/DCTDecode'
-                                    image['/ColorSpace'] = '/DeviceRGB'
-                                    image['/BitsPerComponent'] = 8
-                                    image['/Width'], image['/Height'] = new_size
-                                except Exception as e:
-                                    print(f"Image processing error: {e}")
-                                    continue
-
-                writer.add_page(page)
-
-            output = io.BytesIO()
-            writer.write(output)
-            return output.getvalue()
-
-        except Exception as e:
-            print(f"Image compression error: {str(e)}", file=sys.stderr)
-            return pdf_data
-
-    def optimize_pdf_structure(self, pdf_data):
-        """More thorough PDF optimization"""
-        try:
-            reader = PdfReader(io.BytesIO(pdf_data))
-            writer = PdfWriter()
-
-            for page in reader.pages:
-                # Remove unnecessary elements
-                if '/Annots' in page:
-                    del page['/Annots']
-                if '/Metadata' in page:
-                    del page['/Metadata']
-                writer.add_page(page)
-
-            # Clean up document info
-            writer._info = None
-            writer._ID = None
-
-            # Set more aggressive compression for streams
-            writer._stream = True
-            writer._compress = True
-
-            output = io.BytesIO()
-            writer.write(output)
-            return output.getvalue()
-        except Exception as e:
-            print(f"PDF optimization error: {e}", file=sys.stderr)
-            return pdf_data
-
-    def build_huffman_tree(self, data):
-        """Build Huffman tree from data frequency analysis"""
-        freq = defaultdict(int)
-        for byte in data:
-            freq[byte] += 1
-
-        heap = [[weight, [byte, ""]] for byte, weight in freq.items()]
-        heapq.heapify(heap)
-
-        while len(heap) > 1:
-            lo = heapq.heappop(heap)
-            hi = heapq.heappop(heap)
-            for pair in lo[1:]:
-                pair[1] = '0' + pair[1]
-            for pair in hi[1:]:
-                pair[1] = '1' + pair[1]
-            heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
-
-        return sorted(heapq.heappop(heap)[1:], key=lambda p: (len(p[-1]), p[0]))
-
-    def huffman_compress(self, data, level='medium'):
-        """Actual Huffman compression implementation"""
-        if len(data) < 1024:
-            return data
-
-        try:
-            # Build frequency table
-            freq = defaultdict(int)
-            for byte in data:
-                freq[byte] += 1
-
-            # Build Huffman tree
-            heap = [[weight, [byte, ""]] for byte, weight in freq.items()]
-            heapq.heapify(heap)
-
-            while len(heap) > 1:
-                lo = heapq.heappop(heap)
-                hi = heapq.heappop(heap)
-                for pair in lo[1:]:
-                    pair[1] = '0' + pair[1]
-                for pair in hi[1:]:
-                    pair[1] = '1' + pair[1]
-                heapq.heappush(heap, [lo[0] + hi[0]] + lo[1:] + hi[1:])
-
-            huffman_tree = sorted(heapq.heappop(heap)[1:], key=lambda p: (len(p[-1]), p[0]))
-
-            # Create encoding dictionary
-            huffman_dict = {byte: code for byte, code in huffman_tree}
-
-            # Encode the data
-            encoded_bits = ''.join(huffman_dict[byte] for byte in data)
-
-            # Pad the bits to make them byte-aligned
-            padding = 8 - len(encoded_bits) % 8
-            encoded_bits += '0' * padding
-
-            # Convert to bytes
-            encoded_bytes = bytes(
-                int(encoded_bits[i:i+8], 2)
-                for i in range(0, len(encoded_bits), 8)
-            )
-
-            # Create a new PDF with the compressed data
-            writer = PdfWriter()
-            writer.add_metadata({
-                '/Compression': '/Huffman',
-                '/BitsPerComponent': 8,
-                '/Length': len(encoded_bytes)
-            })
-
-            # Store both the encoded data and the tree for decoding
-            writer._root_object.update({
-                '/HuffmanData': encoded_bytes,
-                '/HuffmanTree': json.dumps(huffman_tree)
-            })
-
-            output = io.BytesIO()
-            writer.write(output)
-            return output.getvalue()
-
-        except Exception as e:
-            print(f"Huffman error: {e}", file=sys.stderr)
-            return self.optimize_pdf_structure(data)
-
-    def lz77_compress(self, data, level='medium'):
-        """Simplified LZ77 without actual compression"""
-        if len(data) < 1024:  # Skip small files
-            return data
-
-        try:
-            # Just return optimized data without actual LZ77 encoding
-            return self.optimize_pdf_structure(data)
-        except Exception as e:
-            print(f"LZ77 error: {e}", file=sys.stderr)
-            return data
-
-    def rle_compress(self, data, level='medium'):
-        """Simplified RLE without actual compression"""
-        if len(data) < 1024:  # Skip small files
-            return data
-
-        try:
-            # Just return optimized data without actual RLE encoding
-            return self.optimize_pdf_structure(data)
-        except Exception as e:
-            print(f"RLE error: {e}", file=sys.stderr)
-            return data
-
-    def zstandard_compress(self, data, level='medium'):
-        """Proper Zstandard compression integrated with PDF"""
-        if len(data) < 1024:
-            return data
-
-        try:
-            compressor = self.zstd_compressors[level]
-            compressed = compressor.compress(data)
-
-            # Create a new PDF wrapper
-            writer = PdfWriter()
-            writer.add_metadata({
-                '/Compression': '/ZStandard',
-                '/CompressionLevel': level,
-                '/Length': len(compressed)
-            })
-
-            # Store compressed data
-            writer._root_object.update({
-                '/ZstdData': compressed,
-                '/ZstdDict': compressor.copy().dict if hasattr(compressor, 'dict') else None
-            })
-
-            output = io.BytesIO()
-            writer.write(output)
-            return output.getvalue()
-
-        except Exception as e:
-            print(f"Zstandard error: {e}", file=sys.stderr)
-            return self.optimize_pdf_structure(data)
-
-    def compare_algorithms(self, data, level='medium'):
-        """Fast algorithm comparison with structure optimization"""
-        results = []
-        optimized = self.optimize_pdf_structure(data)
-        with_images = self.compress_images_in_pdf(optimized, level)
-
-        for name, algorithm in self.compression_algorithms.items():
-            start_time = time.time()
+    for page in writer.pages:
+        for img in page.images:
+            ref = img.indirect_reference
+            if ref is None or ref.idnum in seen:
+                continue
+            seen.add(ref.idnum)
             try:
-                compressed = algorithm(with_images, level)
-                ratio = len(compressed)/len(data)
-                filename = f"{name.lower()}_{int(time.time()*1000)}.pdf"
-                output_path = os.path.join(UPLOAD_FOLDER, filename)
+                obj = ref.get_object()
+                # Replacing the object would drop transparency / inverted decode arrays.
+                if any(k in obj for k in ('/SMask', '/Mask', '/Decode')):
+                    continue
+                pil = img.image
+                if pil is None or pil.mode not in ('RGB', 'L') or min(pil.size) < MIN_IMAGE_SIDE:
+                    continue
 
-                with open(output_path, "wb") as f_out:
-                    f_out.write(compressed)
+                new_size = (max(1, int(pil.width * scale)), max(1, int(pil.height * scale)))
+                small = pil.resize(new_size, Image.LANCZOS)
 
-                results.append({
-                    'algorithm': name,
-                    'original_size': len(data),
-                    'compressed_size': len(compressed),
-                    'compression_ratio': round(1 - ratio, 2),
-                    'time_ms': int((time.time() - start_time) * 1000),
-                    'status': '✓ Success' if len(compressed) < len(data) else '⚠️ No Reduction',
-                    'download_url': f'/download/{filename}'
-                })
+                probe = io.BytesIO()
+                small.save(probe, 'JPEG', quality=quality, optimize=True)
+                if probe.tell() >= len(obj._data):
+                    continue
+                img.replace(small, quality=quality, optimize=True)
             except Exception as e:
-                results.append({
-                    'algorithm': name,
-                    'original_size': len(data),
-                    'compressed_size': len(data),
-                    'compression_ratio': 0,
-                    'time_ms': 0,
-                    'status': f'✗ Failed: {str(e)}',
-                    'download_url': None
-                })
+                log.warning("Skipping image %s: %s", ref.idnum, e)
 
-        return sorted(results, key=lambda x: x['compressed_size'])
 
-compressor = PDFCompressor()
+def strategy_lossless(pdf_data, level):
+    return lossless_optimize(pdf_data)
+
+
+def strategy_images(pdf_data, level):
+    writer = lossless_optimize(pdf_data)
+    recompress_images(writer, level)
+    return writer
+
+
+STRATEGIES = {
+    'Lossless': strategy_lossless,
+    'Images + Lossless': strategy_images,
+}
+
+
+def run_strategy(name, pdf_data, level, page_count):
+    """Returns (result_dict, compressed_bytes_or_None). Output is validated by
+    reopening it, so a corrupt file can never be offered for download."""
+    start = time.time()
+    result = {
+        'algorithm': name,
+        'original_size': len(pdf_data),
+        'compressed_size': len(pdf_data),
+        'saved_percent': 0.0,
+        'ok': False,
+        'status': '',
+        'download_url': None,
+    }
+    compressed = None
+    try:
+        out = io.BytesIO()
+        STRATEGIES[name](pdf_data, level).write(out)
+        data = out.getvalue()
+        if len(PdfReader(io.BytesIO(data)).pages) != page_count:
+            raise ValueError('page count changed')
+        result['compressed_size'] = len(data)
+        if len(data) < len(pdf_data):
+            result['ok'] = True
+            result['status'] = 'Success'
+            result['saved_percent'] = round((1 - len(data) / len(pdf_data)) * 100, 1)
+            compressed = data
+        else:
+            result['status'] = 'No reduction'
+    except Exception as e:
+        log.exception("Strategy %s failed", name)
+        result['status'] = f'Failed: {e}'
+    result['time_ms'] = int((time.time() - start) * 1000)
+    return result, compressed
+
+
+def compare_strategies(pdf_data, level, page_count, name='document'):
+    results = []
+    for strategy in STRATEGIES:
+        result, compressed = run_strategy(strategy, pdf_data, level, page_count)
+        if compressed is not None:
+            file_id = f'{uuid.uuid4().hex}.pdf'
+            with open(os.path.join(OUTPUT_DIR, file_id), 'wb') as f:
+                f.write(compressed)
+            result['download_url'] = f'/download/{file_id}?name={name}'
+        results.append(result)
+    return sorted(results, key=lambda r: r['compressed_size'])
+
+
+def cleanup_old_outputs():
+    cutoff = time.time() - OUTPUT_TTL_SECONDS
+    for name in os.listdir(OUTPUT_DIR):
+        path = os.path.join(OUTPUT_DIR, name)
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.remove(path)
+        except OSError:
+            pass
+
+
+def error(message, status=400, **extra):
+    return jsonify({'success': False, 'error': message, **extra}), status
+
+
+@app.errorhandler(413)
+def too_large(_):
+    return error('File too large (max 50 MB)', 413)
+
 
 @app.route('/')
 def index():
-    return render_template("index.html")
+    return render_template('index.html')
+
 
 @app.route('/compress', methods=['POST'])
 def compress():
-    if 'file' not in request.files:
-        return jsonify({"success": False, "error": "No file uploaded"}), 400
-
-    file = request.files['file']
+    file = request.files.get('file')
+    if file is None:
+        return error('No file uploaded')
     if file.filename == '':
-        return jsonify({"success": False, "error": "No file selected"}), 400
+        return error('No file selected')
 
-    compression_level = request.form.get("compression_level", "medium").lower()
-    if compression_level not in ['low', 'medium', 'high']:
-        compression_level = 'medium'
+    level = request.form.get('compression_level', 'medium').lower()
+    if level not in IMAGE_SETTINGS:
+        level = 'medium'
+
+    data = file.read()
+    if b'%PDF-' not in data[:1024]:
+        return error('Not a valid PDF file')
 
     try:
-        input_data = file.read()
-    except Exception as e:
-        return jsonify({"success": False, "error": f"Error reading file: {str(e)}"}), 400
+        reader = PdfReader(io.BytesIO(data))
+        if reader.is_encrypted:
+            return error('Encrypted PDFs are not supported')
+        page_count = len(reader.pages)
+    except Exception as e:  # PdfReadError and friends: truncated / corrupt files
+        return error(f'Could not read PDF: {e}')
 
-    try:
-        results = compressor.compare_algorithms(input_data, compression_level)
-        successful_results = [r for r in results if r['status'].startswith('✓')]
+    name = secure_filename(os.path.splitext(file.filename)[0]) or 'document'
+    start = time.time()
+    cleanup_old_outputs()
+    results = compare_strategies(data, level, page_count, name)
+    total_time = int((time.time() - start) * 1000)
 
-        if not successful_results:
-            return jsonify({
-                'success': False,
-                'error': "No compression algorithm reduced file size",
-                'comparison': results
-            })
+    best = next((r for r in results if r['ok']), None)
+    if best is None:
+        return error('No strategy reduced the file size', 200, comparison=results,
+                     total_time=total_time)
 
-        best_result = successful_results[0]
-        return jsonify({
-            'success': True,
-            'original_size': best_result['original_size'],
-            'compressed_size': best_result['compressed_size'],
-            'compression_ratio': best_result['compression_ratio'],
-            'algorithm_used': best_result['algorithm'],
-            'download_url': best_result['download_url'],
-            'total_time': best_result['time_ms'],
-            'comparison': results
-        })
+    return jsonify({
+        'success': True,
+        'original_size': best['original_size'],
+        'compressed_size': best['compressed_size'],
+        'saved_percent': best['saved_percent'],
+        'algorithm_used': best['algorithm'],
+        'download_url': best['download_url'],
+        'total_time': total_time,
+        'comparison': results,
+    })
 
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
 
-@app.route('/download/<filename>')
-def download_file(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename, as_attachment=True)
+@app.route('/download/<file_id>')
+def download_file(file_id):
+    if not FILE_ID_RE.match(file_id):
+        return error('Not found', 404)
+    name = secure_filename(request.args.get('name', '')) or 'document'
+    return send_from_directory(OUTPUT_DIR, file_id, as_attachment=True,
+                               download_name=f'{name}-compressed.pdf')
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1')
