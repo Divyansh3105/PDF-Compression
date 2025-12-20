@@ -4,10 +4,8 @@
 <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>PDF Compression with Compression Levels</title>
+    <title>PDF Compression</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet" />
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="https://cdn.tailwindcss.com"></script>
     <style>
         .upload-area {
             border: 2px dashed #4F46E5;
@@ -15,15 +13,19 @@
             padding: 2rem;
             text-align: center;
             cursor: pointer;
-            transition: all 0.3s ease;
+            transition: background-color 0.3s ease;
         }
 
-        .upload-area:hover {
+        .upload-area:hover,
+        .upload-area:focus-visible,
+        .upload-area.dragover {
             background-color: #F3F4F6;
         }
 
         .compression-level {
             cursor: pointer;
+            border: 2px solid #dee2e6;
+            border-radius: 10px;
             transition: all 0.3s ease;
         }
 
@@ -36,229 +38,210 @@
             background-color: #EEF2FF;
         }
 
-        .table td .btn-sm {
-            padding: 0.25rem 0.5rem;
-            font-size: 0.75rem;
-            line-height: 1;
+        @media (prefers-reduced-motion: reduce) {
+
+            .upload-area,
+            .compression-level {
+                transition: none;
+            }
+
+            .compression-level:hover {
+                transform: none;
+            }
         }
     </style>
 </head>
 
-<body class="bg-gray-50">
-    <main class="container mx-auto px-4 py-8">
-        <div class="max-w-4xl mx-auto">
-            <div class="bg-white rounded-lg shadow-sm p-6 mb-6">
-                <h2 class="text-2xl font-bold text-center mb-6">Select Compression Level</h2>
+<body class="bg-light">
+    <main class="container py-5">
+        <div class="mx-auto" style="max-width: 56rem">
+            <div class="bg-white rounded shadow-sm p-4">
+                <h1 class="h3 text-center mb-4">PDF Compression</h1>
 
-                <div class="grid md:grid-cols-3 gap-4 mb-8">
-                    <div class="compression-level border rounded-lg p-4 text-center" data-level="low">
-                        <h3 class="text-lg font-semibold mb-2">Low Compression</h3>
-                        <ul class="text-sm text-left text-gray-600 space-y-1">
-                            <li>• Basic PDF optimization</li>
-                            <li>• Minimal metadata reduction</li>
-                            <li>• Compression ratio: ~20%</li>
-                        </ul>
+                <h2 class="h5 text-center mb-3">Select image quality</h2>
+                <div class="row g-3 mb-4" role="radiogroup" aria-label="Compression level">
+                    <div class="col-md-4">
+                        <div class="compression-level p-3 h-100" data-level="low" role="radio" tabindex="0">
+                            <h3 class="h6 fw-semibold">Low</h3>
+                            <ul class="small text-secondary ps-3 mb-0">
+                                <li>Images kept at 80% size</li>
+                                <li>JPEG quality 75</li>
+                            </ul>
+                        </div>
                     </div>
-                    <div class="compression-level border rounded-lg p-4 text-center" data-level="medium">
-                        <h3 class="text-lg font-semibold mb-2">Medium Compression</h3>
-                        <ul class="text-sm text-left text-gray-600 space-y-1">
-                            <li>• Advanced optimization</li>
-                            <li>• Image downscaling</li>
-                            <li>• Compression ratio: ~50%</li>
-                        </ul>
+                    <div class="col-md-4">
+                        <div class="compression-level p-3 h-100" data-level="medium" role="radio" tabindex="0">
+                            <h3 class="h6 fw-semibold">Medium</h3>
+                            <ul class="small text-secondary ps-3 mb-0">
+                                <li>Images shrunk to 60% size</li>
+                                <li>JPEG quality 50</li>
+                            </ul>
+                        </div>
                     </div>
-                    <div class="compression-level border rounded-lg p-4 text-center" data-level="high">
-                        <h3 class="text-lg font-semibold mb-2">High Compression</h3>
-                        <ul class="text-sm text-left text-gray-600 space-y-1">
-                            <li>• Aggressive optimization</li>
-                            <li>• Maximum compression</li>
-                            <li>• Compression ratio: ~80%</li>
-                        </ul>
+                    <div class="col-md-4">
+                        <div class="compression-level p-3 h-100" data-level="high" role="radio" tabindex="0">
+                            <h3 class="h6 fw-semibold">High</h3>
+                            <ul class="small text-secondary ps-3 mb-0">
+                                <li>Images shrunk to 40% size</li>
+                                <li>JPEG quality 30</li>
+                            </ul>
+                        </div>
                     </div>
                 </div>
+                <p class="small text-secondary text-center">The level only affects embedded images. Savings depend on
+                    the PDF; text-only files shrink little.</p>
 
-                <div class="upload-area mb-6" id="dropZone">
-                    <p class="text-gray-500 mt-2">Drag & drop your PDF here or click to select</p>
-                    <input type="file" id="fileInput" accept="application/pdf" class="hidden" />
+                <div class="upload-area mb-4" id="dropZone" role="button" tabindex="0"
+                    aria-label="Choose a PDF file">
+                    <p class="text-secondary mb-0" id="dropText">Drag &amp; drop your PDF here or click to select</p>
+                    <input type="file" id="fileInput" accept="application/pdf" class="d-none" />
                 </div>
 
-                <button class="btn btn-primary w-full mb-6" id="uploadBtn" disabled>Compress PDF</button>
+                <button class="btn btn-primary w-100 mb-4" id="uploadBtn" disabled>Compress PDF</button>
 
-                <div id="progressContainer" class="hidden">
-                    <h3 class="text-lg font-semibold mb-2">Compression Progress</h3>
-                    <ul id="progressList" class="list-group mb-4"></ul>
+                <div id="progressContainer" class="d-none" role="status">
                     <div class="progress mb-4">
-                        <div id="progressBar" class="progress-bar" role="progressbar" style="width: 0%">0%</div>
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%">
+                            Compressing…</div>
                     </div>
                 </div>
 
-                <div id="error" class="alert alert-danger d-none mt-4"></div>
-                <div id="results" class="hidden mt-5"></div>
+                <div id="error" class="alert alert-danger d-none" role="alert"></div>
+                <div id="summary" class="alert alert-success d-none"></div>
+                <div id="results" class="mt-4"></div>
             </div>
         </div>
     </main>
 
     <script>
-        const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('fileInput');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const compressionLevels = document.querySelectorAll('.compression-level');
+        const MAX_BYTES = 50 * 1024 * 1024;
+        const $ = id => document.getElementById(id);
+        const dropZone = $('dropZone'), fileInput = $('fileInput'), uploadBtn = $('uploadBtn');
+        const levels = document.querySelectorAll('.compression-level');
         let selectedLevel = 'medium';
         let selectedFile = null;
 
-        function updateSelectedLevel(level) {
+        function escapeHtml(s) {
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024, sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function showError(msg) {
+            const el = $('error');
+            el.textContent = msg;
+            el.classList.remove('d-none');
+        }
+
+        function setLevel(level) {
             selectedLevel = level;
-            compressionLevels.forEach(el => {
-                el.classList.toggle('selected', el.dataset.level === level);
+            levels.forEach(el => {
+                const on = el.dataset.level === level;
+                el.classList.toggle('selected', on);
+                el.setAttribute('aria-checked', on);
             });
         }
-        updateSelectedLevel(selectedLevel);
-
-        compressionLevels.forEach(levelDiv => {
-            levelDiv.addEventListener('click', () => {
-                updateSelectedLevel(levelDiv.dataset.level);
+        setLevel(selectedLevel);
+        levels.forEach(el => {
+            el.addEventListener('click', () => setLevel(el.dataset.level));
+            el.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setLevel(el.dataset.level); }
             });
         });
 
         dropZone.addEventListener('click', () => fileInput.click());
-        dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('bg-gray-200'); });
-        dropZone.addEventListener('dragleave', e => { e.preventDefault(); dropZone.classList.remove('bg-gray-200'); });
+        dropZone.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInput.click(); }
+        });
+        dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
         dropZone.addEventListener('drop', e => {
             e.preventDefault();
-            dropZone.classList.remove('bg-gray-200');
-            if (e.dataTransfer.files.length > 0) handleFile(e.dataTransfer.files[0]);
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
         });
         fileInput.addEventListener('change', () => {
-            if (fileInput.files.length > 0) handleFile(fileInput.files[0]);
+            if (fileInput.files.length) handleFile(fileInput.files[0]);
         });
 
         function handleFile(file) {
-            if (file.type !== 'application/pdf') {
-                alert('Please upload a valid PDF file.');
-                return;
+            $('error').classList.add('d-none');
+            if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+                return showError('Please choose a PDF file.');
+            }
+            if (file.size > MAX_BYTES) {
+                return showError('File too large (max 50 MB).');
             }
             selectedFile = file;
             uploadBtn.disabled = false;
-            dropZone.querySelector('p').textContent = `Selected file: ${file.name}`;
+            $('dropText').textContent = `Selected file: ${file.name} (${formatBytes(file.size)})`;
         }
 
         uploadBtn.addEventListener('click', async () => {
             if (!selectedFile) return;
 
-            document.getElementById('error').classList.add('d-none');
-            document.getElementById('progressContainer').classList.remove('hidden');
-            document.getElementById('progressList').innerHTML = '';
-            document.getElementById('progressBar').style.width = '0%';
-            document.getElementById('progressBar').textContent = '0%';
-            document.getElementById('results').classList.add('hidden');
-            document.getElementById('results').innerHTML = '';
-
-            // Update progress
-            document.getElementById('progressBar').style.width = '30%';
-            document.getElementById('progressBar').textContent = '30%';
+            $('error').classList.add('d-none');
+            $('summary').classList.add('d-none');
+            $('results').innerHTML = '';
+            $('progressContainer').classList.remove('d-none');
+            uploadBtn.disabled = true;
 
             const formData = new FormData();
             formData.append('file', selectedFile);
             formData.append('compression_level', selectedLevel);
 
             try {
-                const response = await fetch('/compress', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    throw new Error(`HTTP error! status: ${response.status}`);
+                const response = await fetch('/compress', { method: 'POST', body: formData });
+                let data;
+                try {
+                    data = await response.json();
+                } catch {
+                    throw new Error(`Server error (HTTP ${response.status})`);
                 }
+                if (data.comparison) displayResults(data);
+                if (!data.success) throw new Error(data.error || `Compression failed (HTTP ${response.status})`);
 
-                const data = await response.json();
-
-                if (!data.success) {
-                    throw new Error(data.error || 'Compression failed');
-                }
-
-                // Update progress to complete
-                document.getElementById('progressBar').style.width = '100%';
-                document.getElementById('progressBar').textContent = 'Completed';
-
-                displayResults(data);
+                const s = $('summary');
+                s.innerHTML = `Saved <strong>${data.saved_percent}%</strong>: ${formatBytes(data.original_size)} → ${formatBytes(data.compressed_size)} ` +
+                    `with <strong>${escapeHtml(data.algorithm_used)}</strong> in ${data.total_time} ms. ` +
+                    `<a class="alert-link" href="${encodeURI(data.download_url)}">Download</a>`;
+                s.classList.remove('d-none');
             } catch (error) {
-                document.getElementById('error').textContent = error.message;
-                document.getElementById('error').classList.remove('d-none');
-                document.getElementById('progressContainer').classList.add('hidden');
+                showError(error.message);
+            } finally {
+                $('progressContainer').classList.add('d-none');
+                uploadBtn.disabled = false;
             }
         });
 
-        function formatBytes(bytes) {
-            if (bytes === 0) return '0 Bytes';
-            const k = 1024;
-            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
-            const i = Math.floor(Math.log(bytes) / Math.log(k));
-            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-        }
-
         function displayResults(data) {
-            const resultsDiv = document.getElementById('results');
-            resultsDiv.classList.remove('hidden');
+            const rows = data.comparison.map(r => `
+                <tr class="${r.algorithm === data.algorithm_used ? 'table-success' : ''}">
+                    <td>${escapeHtml(r.algorithm)}</td>
+                    <td>${formatBytes(r.original_size)}</td>
+                    <td>${formatBytes(r.compressed_size)}</td>
+                    <td>${r.saved_percent}% saved</td>
+                    <td>${r.time_ms} ms</td>
+                    <td>${escapeHtml(r.status)}
+                        ${r.download_url ? `<br><a class="btn btn-sm btn-outline-success mt-1" href="${encodeURI(r.download_url)}">Download</a>` : ''}
+                    </td>
+                </tr>`).join('');
 
-            const progressList = document.getElementById('progressList');
-            if (data.steps) {
-                data.steps.forEach(step => {
-                    const li = document.createElement('li');
-                    li.classList.add('list-group-item');
-                    li.innerHTML = `<strong>${step.name}</strong><br>Time: ${step.time.toFixed(2)} ms | Memory: ${formatBytes(step.memoryUsed)}`;
-                    progressList.appendChild(li);
-                });
-            }
-
-            if (data.comparison && data.comparison.length > 0) {
-                const comparisonDiv = document.createElement('div');
-                comparisonDiv.classList.add('mt-5');
-
-                const heading = document.createElement('h4');
-                heading.textContent = 'Algorithm Comparison';
-                heading.classList.add('text-lg', 'font-semibold', 'mb-3');
-                comparisonDiv.appendChild(heading);
-
-                const table = document.createElement('table');
-                table.classList.add('table', 'table-bordered', 'table-hover', 'w-full');
-
-                const thead = document.createElement('thead');
-                thead.innerHTML = `
-                    <tr class="bg-gray-100">
-                        <th class="p-2">Algorithm</th>
-                        <th class="p-2">Original</th>
-                        <th class="p-2">Compressed</th>
-                        <th class="p-2">Ratio</th>
-                        <th class="p-2">Time (ms)</th>
-                        <th class="p-2">Status</th>
-                    </tr>`;
-                table.appendChild(thead);
-
-                const tbody = document.createElement('tbody');
-                data.comparison.forEach(result => {
-                    const row = document.createElement('tr');
-                    if (result.algorithm === data.algorithm_used) row.classList.add('table-success');
-                    row.innerHTML = `
-                        <td class="p-2">${result.algorithm}</td>
-                        <td class="p-2">${formatBytes(result.original_size)}</td>
-                        <td class="p-2">${formatBytes(result.compressed_size)}</td>
-                        <td class="p-2">${result.compression_ratio.toFixed(2)}x</td>
-                        <td class="p-2">${result.time_ms.toFixed(2)}</td>
-                        <td class="p-2">
-                            ${result.status}
-                            ${result.download_url ? `<br><a class="btn btn-sm btn-outline-success mt-1" href="${result.download_url}" target="_blank">Download</a>` : ''}
-                        </td>`;
-                    tbody.appendChild(row);
-                });
-
-                table.appendChild(tbody);
-                comparisonDiv.appendChild(table);
-                resultsDiv.appendChild(comparisonDiv);
-            }
-
-            document.getElementById('progressBar').style.width = '100%';
-            document.getElementById('progressBar').textContent = 'Completed';
+            $('results').innerHTML = `
+                <h2 class="h5 mb-3">Strategy comparison</h2>
+                <div class="table-responsive">
+                    <table class="table table-bordered table-hover">
+                        <thead class="table-light"><tr>
+                            <th>Strategy</th><th>Original</th><th>Compressed</th><th>Saved</th><th>Time</th><th>Status</th>
+                        </tr></thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>`;
         }
     </script>
 </body>
