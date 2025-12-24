@@ -1,16 +1,17 @@
 # 📄 PDF Compression
 
-Welcome to **PDF Compression**, a lightweight and efficient tool to reduce the size of PDF files for easier storage and sharing. This project demonstrates PDF compression using **Python**, **Flask**, and libraries like **PyPDF2** and **Pillow**.
+Welcome to **PDF Compression**, a lightweight and efficient tool to reduce the size of PDF files for easier storage and sharing. This project demonstrates PDF compression using **Python**, **Flask**, and libraries like **pypdf** and **Pillow**.
 
 ---
 
 ## 🚀 Features
 
-- 📉 Compress PDF files with different compression levels (Low / Medium / High)
+- 📉 Compress PDFs by deflating streams, merging duplicate objects and re-encoding images (Low / Medium / High image quality)
+- 🔍 Side-by-side comparison of strategies; every output is re-opened and checked before it is offered
 - ⚡ Fast and efficient file processing
 - 📂 Upload and download compressed PDFs
 - 🖥️ Clean and responsive web interface using Bootstrap
-- 🛡️ Basic validations for file type and size
+- 🛡️ Server-side validation: PDF header, 50 MB limit, encrypted files rejected; results are deleted after 1 hour
 
 ---
 
@@ -20,7 +21,7 @@ Welcome to **PDF Compression**, a lightweight and efficient tool to reduce the s
 | ---------- | ------------------------------------ |
 | Python     | Core backend logic                   |
 | Flask      | Lightweight web framework            |
-| PyPDF2     | PDF manipulation                     |
+| pypdf      | PDF manipulation                     |
 | Pillow     | Image compression inside PDFs        |
 | Bootstrap  | Frontend framework for responsive UI |
 | HTML/CSS   | Structure and styling                |
@@ -50,7 +51,7 @@ git clone https://github.com/Divyansh3105/PDF-Compression.git
 cd PDF-Compression
 ```
 
-3️⃣ Install the required packages:
+3️⃣ Install the required packages (a virtualenv is recommended):
 
 ```bash
 pip install -r requirements.txt
@@ -59,7 +60,7 @@ pip install -r requirements.txt
 4️⃣ Run the Flask app:
 
 ```bash
-python app.py
+python compress.py
 ```
 
 ---
@@ -68,6 +69,8 @@ python app.py
 
 - Open your browser and go to `http://127.0.0.1:5000/`
 - Upload a PDF, select a compression level, and download the compressed file.
+- Set `FLASK_DEBUG=1` to enable debug mode (off by default; never expose it publicly).
+- Run tests with `pip install pytest && pytest`.
 
 ---
 
