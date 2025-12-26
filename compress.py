@@ -5,16 +5,28 @@ import tempfile
 import time
 import uuid
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, render_template, request, send_from_directory, jsonify
 from pypdf import PdfReader, PdfWriter
 from PIL import Image
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from werkzeug.utils import secure_filename
 
 log = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # whole request (several files)
+MAX_FILE_BYTES = 50 * 1024 * 1024
+limiter = Limiter(get_remote_address, app=app, storage_uri='memory://')
+
+# ponytail: jobs live in this process's memory, so run a single worker process
+# (gunicorn --workers 1 --threads N). Move to Redis/RQ to scale out.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+EXECUTOR = ThreadPoolExecutor(max_workers=2)
 
 # Results live outside static/ so they are not served publicly, and are
 # only reachable through /download/<random id>.
@@ -32,22 +44,26 @@ IMAGE_SETTINGS = {
 MIN_IMAGE_SIDE = 64  # don't touch icons / tiny images
 
 
-def lossless_optimize(pdf_data):
+def lossless_optimize(pdf_data, progress=lambda f: None):
     """Deflate content streams and merge duplicate objects. Keeps annotations,
     links, forms and metadata intact."""
     writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf_data)))
-    for page in writer.pages:
+    pages = list(writer.pages)
+    for i, page in enumerate(pages, 1):
         page.compress_content_streams()
+        progress(i / len(pages))
     writer.compress_identical_objects(remove_duplicates=True, remove_unreferenced=True)
     return writer
 
 
-def recompress_images(writer, level):
+def recompress_images(writer, level, progress=lambda f: None):
     """Downscale + re-encode embedded images as JPEG, only where that shrinks them."""
     quality, scale = IMAGE_SETTINGS[level]
     seen = set()  # shared images must only be processed once
 
-    for page in writer.pages:
+    pages = list(writer.pages)
+    for i, page in enumerate(pages, 1):
+        progress((i - 1) / len(pages))
         for img in page.images:
             ref = img.indirect_reference
             if ref is None or ref.idnum in seen:
@@ -72,15 +88,16 @@ def recompress_images(writer, level):
                 img.replace(small, quality=quality, optimize=True)
             except Exception as e:
                 log.warning("Skipping image %s: %s", ref.idnum, e)
+    progress(1)
 
 
-def strategy_lossless(pdf_data, level):
-    return lossless_optimize(pdf_data)
+def strategy_lossless(pdf_data, level, progress):
+    return lossless_optimize(pdf_data, progress)
 
 
-def strategy_images(pdf_data, level):
-    writer = lossless_optimize(pdf_data)
-    recompress_images(writer, level)
+def strategy_images(pdf_data, level, progress):
+    writer = lossless_optimize(pdf_data, lambda f: progress(f * 0.3))
+    recompress_images(writer, level, lambda f: progress(0.3 + f * 0.7))
     return writer
 
 
@@ -90,7 +107,7 @@ STRATEGIES = {
 }
 
 
-def run_strategy(name, pdf_data, level, page_count):
+def run_strategy(name, pdf_data, level, page_count, progress=lambda f: None):
     """Returns (result_dict, compressed_bytes_or_None). Output is validated by
     reopening it, so a corrupt file can never be offered for download."""
     start = time.time()
@@ -106,7 +123,7 @@ def run_strategy(name, pdf_data, level, page_count):
     compressed = None
     try:
         out = io.BytesIO()
-        STRATEGIES[name](pdf_data, level).write(out)
+        STRATEGIES[name](pdf_data, level, progress).write(out)
         data = out.getvalue()
         if len(PdfReader(io.BytesIO(data)).pages) != page_count:
             raise ValueError('page count changed')
@@ -125,21 +142,27 @@ def run_strategy(name, pdf_data, level, page_count):
     return result, compressed
 
 
-def compare_strategies(pdf_data, level, page_count, name='document'):
+def compare_strategies(pdf_data, level, page_count, name='document', progress=lambda f: None):
     results = []
-    for strategy in STRATEGIES:
-        result, compressed = run_strategy(strategy, pdf_data, level, page_count)
+    for i, strategy in enumerate(STRATEGIES):
+        result, compressed = run_strategy(
+            strategy, pdf_data, level, page_count,
+            lambda f, i=i: progress((i + f) / len(STRATEGIES)))
         if compressed is not None:
             file_id = f'{uuid.uuid4().hex}.pdf'
             with open(os.path.join(OUTPUT_DIR, file_id), 'wb') as f:
                 f.write(compressed)
             result['download_url'] = f'/download/{file_id}?name={name}'
         results.append(result)
+    progress(1)
     return sorted(results, key=lambda r: r['compressed_size'])
 
 
 def cleanup_old_outputs():
     cutoff = time.time() - OUTPUT_TTL_SECONDS
+    with JOBS_LOCK:
+        for job_id in [j for j, job in JOBS.items() if job['created'] < cutoff]:
+            del JOBS[job_id]
     for name in os.listdir(OUTPUT_DIR):
         path = os.path.join(OUTPUT_DIR, name)
         try:
@@ -163,8 +186,41 @@ def index():
     return render_template('index.html')
 
 
+def build_payload(results, total_time):
+    best = next((r for r in results if r['ok']), None)
+    if best is None:
+        return {'success': False, 'error': 'No strategy reduced the file size',
+                'comparison': results, 'total_time': total_time}
+    return {
+        'success': True,
+        'original_size': best['original_size'],
+        'compressed_size': best['compressed_size'],
+        'saved_percent': best['saved_percent'],
+        'algorithm_used': best['algorithm'],
+        'download_url': best['download_url'],
+        'total_time': total_time,
+        'comparison': results,
+    }
+
+
+def run_job(job_id, data, level, page_count, name):
+    job = JOBS[job_id]
+    job['state'] = 'running'
+    start = time.time()
+    try:
+        results = compare_strategies(data, level, page_count, name,
+                                     lambda f: job.update(progress=f))
+        job['result'] = build_payload(results, int((time.time() - start) * 1000))
+    except Exception as e:
+        log.exception('Job %s failed', job_id)
+        job['result'] = {'success': False, 'error': f'Compression failed: {e}'}
+    job['state'] = 'done'
+
+
 @app.route('/compress', methods=['POST'])
+@limiter.limit('30 per minute')
 def compress():
+    """Validates the upload, queues a job and returns its id (poll /status/<id>)."""
     file = request.files.get('file')
     if file is None:
         return error('No file uploaded')
@@ -176,6 +232,8 @@ def compress():
         level = 'medium'
 
     data = file.read()
+    if len(data) > MAX_FILE_BYTES:
+        return error('File too large (max 50 MB)', 413)
     if b'%PDF-' not in data[:1024]:
         return error('Not a valid PDF file')
 
@@ -184,30 +242,26 @@ def compress():
         if reader.is_encrypted:
             return error('Encrypted PDFs are not supported')
         page_count = len(reader.pages)
-    except Exception as e:  # PdfReadError and friends: truncated / corrupt files
+    except Exception as e:  # truncated / corrupt files
         return error(f'Could not read PDF: {e}')
 
     name = secure_filename(os.path.splitext(file.filename)[0]) or 'document'
-    start = time.time()
     cleanup_old_outputs()
-    results = compare_strategies(data, level, page_count, name)
-    total_time = int((time.time() - start) * 1000)
+    job_id = uuid.uuid4().hex
+    with JOBS_LOCK:
+        JOBS[job_id] = {'state': 'queued', 'progress': 0.0, 'result': None,
+                        'created': time.time()}
+    EXECUTOR.submit(run_job, job_id, data, level, page_count, name)
+    return jsonify({'success': True, 'job_id': job_id}), 202
 
-    best = next((r for r in results if r['ok']), None)
-    if best is None:
-        return error('No strategy reduced the file size', 200, comparison=results,
-                     total_time=total_time)
 
-    return jsonify({
-        'success': True,
-        'original_size': best['original_size'],
-        'compressed_size': best['compressed_size'],
-        'saved_percent': best['saved_percent'],
-        'algorithm_used': best['algorithm'],
-        'download_url': best['download_url'],
-        'total_time': total_time,
-        'comparison': results,
-    })
+@app.route('/status/<job_id>')
+def status(job_id):
+    job = JOBS.get(job_id)
+    if job is None:
+        return error('Unknown or expired job', 404)
+    return jsonify({'state': job['state'], 'progress': round(job['progress'] * 100),
+                    'result': job['result']})
 
 
 @app.route('/download/<file_id>')
@@ -219,5 +273,5 @@ def download_file(file_id):
                                download_name=f'{name}-compressed.pdf')
 
 
-if __name__ == '__main__':
+if __name__ == '__main__':  # dev server; use gunicorn in production (see Dockerfile)
     app.run(debug=os.environ.get('FLASK_DEBUG') == '1')
