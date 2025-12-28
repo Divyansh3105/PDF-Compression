@@ -92,34 +92,26 @@
                     the PDF; text-only files shrink little.</p>
 
                 <div class="upload-area mb-4" id="dropZone" role="button" tabindex="0"
-                    aria-label="Choose a PDF file">
-                    <p class="text-secondary mb-0" id="dropText">Drag &amp; drop your PDF here or click to select</p>
-                    <input type="file" id="fileInput" accept="application/pdf" class="d-none" />
-                </div>
-
-                <button class="btn btn-primary w-100 mb-4" id="uploadBtn" disabled>Compress PDF</button>
-
-                <div id="progressContainer" class="d-none" role="status">
-                    <div class="progress mb-4">
-                        <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%">
-                            Compressing…</div>
-                    </div>
+                    aria-label="Choose PDF files">
+                    <p class="text-secondary mb-0" id="dropText">Drag &amp; drop your PDFs here or click to select</p>
+                    <input type="file" id="fileInput" accept="application/pdf" multiple class="d-none" />
                 </div>
 
                 <div id="error" class="alert alert-danger d-none" role="alert"></div>
-                <div id="summary" class="alert alert-success d-none"></div>
-                <div id="results" class="mt-4"></div>
+                <button class="btn btn-primary w-100 mb-4" id="uploadBtn" disabled>Compress</button>
+                <div id="jobs" aria-live="polite"></div>
             </div>
         </div>
     </main>
 
     <script>
         const MAX_BYTES = 50 * 1024 * 1024;
+        const DEFAULT_DROP_TEXT = 'Drag & drop your PDFs here or click to select';
         const $ = id => document.getElementById(id);
         const dropZone = $('dropZone'), fileInput = $('fileInput'), uploadBtn = $('uploadBtn');
         const levels = document.querySelectorAll('.compression-level');
         let selectedLevel = 'medium';
-        let selectedFile = null;
+        let selectedFiles = [];
 
         function escapeHtml(s) {
             return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -135,7 +127,7 @@
         function showError(msg) {
             const el = $('error');
             el.textContent = msg;
-            el.classList.remove('d-none');
+            el.classList.toggle('d-none', !msg);
         }
 
         function setLevel(level) {
@@ -163,85 +155,101 @@
         dropZone.addEventListener('drop', e => {
             e.preventDefault();
             dropZone.classList.remove('dragover');
-            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+            handleFiles(e.dataTransfer.files);
         });
-        fileInput.addEventListener('change', () => {
-            if (fileInput.files.length) handleFile(fileInput.files[0]);
-        });
+        fileInput.addEventListener('change', () => handleFiles(fileInput.files));
 
-        function handleFile(file) {
-            $('error').classList.add('d-none');
-            if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-                return showError('Please choose a PDF file.');
-            }
-            if (file.size > MAX_BYTES) {
-                return showError('File too large (max 50 MB).');
-            }
-            selectedFile = file;
-            uploadBtn.disabled = false;
-            $('dropText').textContent = `Selected file: ${file.name} (${formatBytes(file.size)})`;
+        function handleFiles(fileList) {
+            showError('');
+            const rejected = [];
+            selectedFiles = [...fileList].filter(f => {
+                const isPdf = f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf');
+                if (!isPdf) rejected.push(`${f.name}: not a PDF`);
+                else if (f.size > MAX_BYTES) rejected.push(`${f.name}: larger than 50 MB`);
+                return isPdf && f.size <= MAX_BYTES;
+            });
+            if (rejected.length) showError('Skipped: ' + rejected.join('; '));
+            uploadBtn.disabled = selectedFiles.length === 0;
+            $('dropText').textContent = selectedFiles.length
+                ? selectedFiles.map(f => `${f.name} (${formatBytes(f.size)})`).join(', ')
+                : DEFAULT_DROP_TEXT;
         }
 
-        uploadBtn.addEventListener('click', async () => {
-            if (!selectedFile) return;
-
-            $('error').classList.add('d-none');
-            $('summary').classList.add('d-none');
-            $('results').innerHTML = '';
-            $('progressContainer').classList.remove('d-none');
+        uploadBtn.addEventListener('click', () => {
             uploadBtn.disabled = true;
-
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-            formData.append('compression_level', selectedLevel);
-
-            try {
-                const response = await fetch('/compress', { method: 'POST', body: formData });
-                let data;
-                try {
-                    data = await response.json();
-                } catch {
-                    throw new Error(`Server error (HTTP ${response.status})`);
-                }
-                if (data.comparison) displayResults(data);
-                if (!data.success) throw new Error(data.error || `Compression failed (HTTP ${response.status})`);
-
-                const s = $('summary');
-                s.innerHTML = `Saved <strong>${data.saved_percent}%</strong>: ${formatBytes(data.original_size)} → ${formatBytes(data.compressed_size)} ` +
-                    `with <strong>${escapeHtml(data.algorithm_used)}</strong> in ${data.total_time} ms. ` +
-                    `<a class="alert-link" href="${encodeURI(data.download_url)}">Download</a>`;
-                s.classList.remove('d-none');
-            } catch (error) {
-                showError(error.message);
-            } finally {
-                $('progressContainer').classList.add('d-none');
-                uploadBtn.disabled = false;
-            }
+            $('jobs').innerHTML = '';
+            Promise.allSettled(selectedFiles.map(compressFile))
+                .then(() => { uploadBtn.disabled = selectedFiles.length === 0; });
         });
 
-        function displayResults(data) {
-            const rows = data.comparison.map(r => `
-                <tr class="${r.algorithm === data.algorithm_used ? 'table-success' : ''}">
-                    <td>${escapeHtml(r.algorithm)}</td>
-                    <td>${formatBytes(r.original_size)}</td>
-                    <td>${formatBytes(r.compressed_size)}</td>
-                    <td>${r.saved_percent}% saved</td>
-                    <td>${r.time_ms} ms</td>
-                    <td>${escapeHtml(r.status)}
-                        ${r.download_url ? `<br><a class="btn btn-sm btn-outline-success mt-1" href="${encodeURI(r.download_url)}">Download</a>` : ''}
+        function createCard(file) {
+            const card = document.createElement('div');
+            card.className = 'border rounded p-3 mb-3';
+            card.innerHTML = `
+                <div class="d-flex justify-content-between"><strong>${escapeHtml(file.name)}</strong>
+                    <span class="text-secondary small">${formatBytes(file.size)}</span></div>
+                <div class="progress my-2"><div class="progress-bar" role="progressbar" style="width:0%">Queued</div></div>
+                <div class="outcome"></div>`;
+            $('jobs').appendChild(card);
+            return card;
+        }
+
+        async function compressFile(file) {
+            const card = createCard(file);
+            const bar = card.querySelector('.progress-bar'), outcome = card.querySelector('.outcome');
+            const fail = msg => {
+                card.querySelector('.progress')?.remove();
+                outcome.innerHTML = `<div class="alert alert-danger mb-0">${escapeHtml(msg)}</div>`;
+            };
+            try {
+                const formData = new FormData();
+                formData.append('file', file);
+                formData.append('compression_level', selectedLevel);
+                const start = await fetch('/compress', { method: 'POST', body: formData });
+                const started = await start.json().catch(() => ({ error: `Server error (HTTP ${start.status})` }));
+                if (!start.ok) return fail(started.error || `Upload failed (HTTP ${start.status})`);
+
+                let status;
+                do {
+                    await new Promise(r => setTimeout(r, 500));
+                    const res = await fetch(`/status/${started.job_id}`);
+                    if (!res.ok) return fail('Job expired or was lost. Please try again.');
+                    status = await res.json();
+                    bar.style.width = status.progress + '%';
+                    bar.textContent = status.state === 'queued' ? 'Queued' : status.progress + '%';
+                } while (status.state !== 'done');
+
+                card.querySelector('.progress').remove();
+                const r = status.result;
+                if (r.success) {
+                    outcome.innerHTML = `<div class="alert alert-success mb-2">
+                        Saved <strong>${r.saved_percent}%</strong>: ${formatBytes(r.original_size)} → ${formatBytes(r.compressed_size)}
+                        with <strong>${escapeHtml(r.algorithm_used)}</strong> in ${r.total_time} ms.
+                        <a class="btn btn-sm btn-success ms-2" href="${encodeURI(r.download_url)}">Download</a></div>`;
+                } else {
+                    outcome.innerHTML = `<div class="alert alert-warning mb-2">${escapeHtml(r.error)}</div>`;
+                }
+                if (r.comparison) outcome.insertAdjacentHTML('beforeend', comparisonTable(r));
+            } catch (e) {
+                fail(e.message);
+            }
+        }
+
+        function comparisonTable(r) {
+            const rows = r.comparison.map(c => `
+                <tr class="${c.algorithm === r.algorithm_used ? 'table-success' : ''}">
+                    <td>${escapeHtml(c.algorithm)}</td>
+                    <td>${formatBytes(c.compressed_size)}</td>
+                    <td>${c.saved_percent}%</td>
+                    <td>${c.time_ms} ms</td>
+                    <td>${escapeHtml(c.status)}
+                        ${c.download_url ? `<a class="btn btn-sm btn-outline-success ms-2" href="${encodeURI(c.download_url)}">Download</a>` : ''}
                     </td>
                 </tr>`).join('');
-
-            $('results').innerHTML = `
-                <h2 class="h5 mb-3">Strategy comparison</h2>
-                <div class="table-responsive">
-                    <table class="table table-bordered table-hover">
-                        <thead class="table-light"><tr>
-                            <th>Strategy</th><th>Original</th><th>Compressed</th><th>Saved</th><th>Time</th><th>Status</th>
-                        </tr></thead>
-                        <tbody>${rows}</tbody>
-                    </table>
-                </div>`;
+            return `<details><summary class="small text-secondary">Strategy comparison</summary>
+                <div class="table-responsive mt-2"><table class="table table-sm table-bordered mb-0">
+                    <thead class="table-light"><tr><th>Strategy</th><th>Size</th><th>Saved</th><th>Time</th><th>Status</th></tr></thead>
+                    <tbody>${rows}</tbody></table></div></details>`;
         }
     </script>
 </body>
