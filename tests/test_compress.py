@@ -1,6 +1,7 @@
 import io
 import os
 import sys
+import time
 
 import pytest
 from PIL import Image
@@ -29,14 +30,33 @@ def post(client, data, level='high', name='doc.pdf'):
         'file': (io.BytesIO(data), name), 'compression_level': level})
 
 
+def run(client, data, **kw):
+    """Submit a job and poll until it finishes; returns the final status body."""
+    r = post(client, data, **kw)
+    assert r.status_code == 202
+    job_id = r.get_json()['job_id']
+    for _ in range(100):
+        body = client.get(f'/status/{job_id}').get_json()
+        if body['state'] == 'done':
+            return body
+        time.sleep(0.1)
+    raise AssertionError('job did not finish')
+
+
 def test_compress_returns_smaller_valid_pdf(client):
     pdf = make_pdf()
-    body = post(client, pdf).get_json()
+    done = run(client, pdf)
+    assert done['progress'] == 100
+    body = done['result']
     assert body['success'] and body['compressed_size'] < len(pdf)
     out = client.get(body['download_url'])
     assert out.status_code == 200
     assert 'doc-compressed.pdf' in out.headers['Content-Disposition']
     assert len(PdfReader(io.BytesIO(out.data)).pages) == 2
+
+
+def test_unknown_job_is_404(client):
+    assert client.get('/status/nope').status_code == 404
 
 
 def test_rejects_non_pdf(client):
