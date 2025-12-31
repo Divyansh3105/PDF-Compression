@@ -7,6 +7,7 @@ Welcome to **PDF Compression**, a lightweight and efficient tool to reduce the s
 ## 🚀 Features
 
 - 📉 Compress PDFs by deflating streams, merging duplicate objects and re-encoding images (Low / Medium / High image quality)
+- 📚 Batch upload with background jobs and live progress
 - 🔍 Side-by-side comparison of strategies; every output is re-opened and checked before it is offered
 - ⚡ Fast and efficient file processing
 - 📂 Upload and download compressed PDFs
@@ -22,6 +23,7 @@ Welcome to **PDF Compression**, a lightweight and efficient tool to reduce the s
 | Python     | Core backend logic                   |
 | Flask      | Lightweight web framework            |
 | pypdf      | PDF manipulation                     |
+| Flask-Limiter | Rate limiting on uploads          |
 | Pillow     | Image compression inside PDFs        |
 | Bootstrap  | Frontend framework for responsive UI |
 | HTML/CSS   | Structure and styling                |
@@ -69,6 +71,7 @@ python compress.py
 
 - Open your browser and go to `http://127.0.0.1:5000/`
 - Upload a PDF, select a compression level, and download the compressed file.
+- Docker: `docker build -t pdf-compression . && docker run -p 8000:8000 pdf-compression` (single gunicorn worker; job state is in memory).
 - Set `FLASK_DEBUG=1` to enable debug mode (off by default; never expose it publicly).
 - Run tests with `pip install pytest && pytest`.
 
