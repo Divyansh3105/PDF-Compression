@@ -32,6 +32,7 @@ EXECUTOR = ThreadPoolExecutor(max_workers=2)
 # only reachable through /download/<random id>.
 OUTPUT_DIR = os.path.join(tempfile.gettempdir(), 'pdf-compression')
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
 OUTPUT_TTL_SECONDS = 3600
 FILE_ID_RE = re.compile(r'^[0-9a-f]{32}\.pdf$')
 
@@ -215,6 +216,11 @@ def run_job(job_id, data, level, page_count, name):
         log.exception('Job %s failed', job_id)
         job['result'] = {'success': False, 'error': f'Compression failed: {e}'}
     job['state'] = 'done'
+
+
+@app.route('/og.png')
+def og_image():
+    return send_from_directory(ASSETS_DIR, 'og.png', max_age=86400)
 
 
 @app.route('/compress', methods=['POST'])
