@@ -77,3 +77,11 @@ def test_annotations_survive():
     buf = io.BytesIO(); w.write(buf)
     out = io.BytesIO(); compress.lossless_optimize(buf.getvalue()).write(out)
     assert '/Annots' in PdfReader(io.BytesIO(out.getvalue())).pages[0]
+
+
+def test_page_has_social_tags_and_image_route(client):
+    html = client.get('/').get_data(as_text=True)
+    assert 'property="og:title"' in html and 'rel="icon"' in html
+    assert 'http://localhost/og.png' in html  # absolute URL, built by Flask
+    img = client.get('/og.png')
+    assert img.status_code == 200 and img.mimetype == 'image/png'
